@@ -84,7 +84,7 @@ export async function POST(req: NextRequest) {
     // --- 6) Call OpenAI with structured JSON output ---
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
-      temperature: 0.35,
+      temperature: 0.55,
       max_tokens: 700,
       messages: openaiMessages,
       response_format: { type: 'json_object' }
