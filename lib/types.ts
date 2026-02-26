@@ -9,5 +9,10 @@ export interface ClassifiedResponse {
   bucket: Bucket;
   crisis: boolean;
   response: string;
+  /**
+   * Updated internal state summary produced by the model for this session.
+   * The frontend stores this and sends it back with the next request.
+   */
+  newInternalState: string;
 }
 

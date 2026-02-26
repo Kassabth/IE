@@ -17,6 +17,7 @@ type ApiResponse = {
   bucket: Bucket;
   crisis: boolean;
   response: string;
+  newInternalState: string;
 };
 
 export default function HomePage() {
@@ -24,6 +25,8 @@ export default function HomePage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Session-level internal state, never shown directly to the user.
+  const [internalState, setInternalState] = useState<string>('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -50,7 +53,8 @@ export default function HomePage() {
             content: m.content
           })),
           { role: 'user' as const, content: trimmed }
-        ]
+        ],
+        internalState
       };
 
       const res = await fetch('/api/chat', {
@@ -65,6 +69,7 @@ export default function HomePage() {
       }
 
       const data: ApiResponse = await res.json();
+      setInternalState(data.newInternalState ?? '');
 
       const assistantMessage: UiMessage = {
         id: crypto.randomUUID(),

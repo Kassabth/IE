@@ -11,10 +11,10 @@ export const runtime = 'nodejs';
 // TODO: Implement proper rate limiting (e.g., Redis or database-backed tokens) before broader launch.
 
 /**
- * Builds a short, session-only summary from recent user messages so the model
- * can notice recurrent themes and tension patterns without long-term storage.
+ * Builds a short, session-only snapshot from recent user messages so the model
+ * can notice immediate themes and tension patterns.
  */
-function buildInternalState(messages: { role: string; content: string }[]) {
+function buildSessionSnapshot(messages: { role: string; content: string }[]) {
   const lastUserMessages = messages
     .filter((m) => m.role === 'user')
     .slice(-4); // only last 4 user messages
@@ -22,9 +22,8 @@ function buildInternalState(messages: { role: string; content: string }[]) {
   const combined = lastUserMessages.map((m) => m.content).join(' ');
 
   return `
-Internal State Summary (session-only):
-- Recurrent themes: ${combined.slice(0, 300)}
-- Detect tension patterns and identity conflict if present.
+Latest turn snapshot (session-only, not shown to the user):
+- Recurrent themes in the last few messages: ${combined.slice(0, 300)}
   `.trim();
 }
 
@@ -41,7 +40,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { messages } = parseResult.data;
+    const { messages, internalState } = parseResult.data;
 
     // --- 2) Ensure we have at least one user message ---
     const latestUserMessage = [...messages].reverse().find((m) => m.role === 'user');
@@ -65,19 +64,24 @@ export async function POST(req: NextRequest) {
             'If available in your country, you can also reach out to a crisis hotline or mental health professional.',
             'You do not have to navigate this alone — please reach out to real-world support.',
             'You can write one simple sentence about who you will contact or what safe step you will take next.'
-          ].join('\n\n')
+          ].join('\n\n'),
+        // In crisis paths we simply carry forward whatever internal state we had.
+        newInternalState: internalState ?? ''
       };
 
       return NextResponse.json(crisisPayload, { status: 200 });
     }
 
-    // --- 4) Build internal state from recent user messages (session-only memory) ---
-    const internalState = buildInternalState(messages);
+    // --- 4) Build a short snapshot from recent user messages (session-only hint) ---
+    const snapshot = buildSessionSnapshot(messages);
 
-    // --- 5) Assemble messages for OpenAI: system prompt + internal state + conversation ---
+    // --- 5) Assemble messages for OpenAI: system prompt + existing internal state + snapshot + conversation ---
     const openaiMessages = [
       { role: 'system' as const, content: SYSTEM_PROMPT },
-      { role: 'system' as const, content: internalState },
+      ...(internalState
+        ? ([{ role: 'system' as const, content: `Existing internal state for this session:\n${internalState}` }] as const)
+        : []),
+      { role: 'system' as const, content: snapshot },
       ...messages.map((m: ChatMessage) => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }))
     ];
 
@@ -97,7 +101,8 @@ export async function POST(req: NextRequest) {
       .object({
         bucket: z.enum(['URGE_LOOP', 'OVERWHELM', 'SELF_DOUBT', 'OUT_OF_SCOPE']),
         crisis: z.boolean(),
-        response: z.string().min(1)
+        response: z.string().min(1),
+        newInternalState: z.string().max(4000).optional().default(internalState ?? '')
       })
       .safeParse(JSON.parse(raw));
 
@@ -107,7 +112,8 @@ export async function POST(req: NextRequest) {
         bucket: 'OUT_OF_SCOPE',
         crisis: false,
         response:
-          'Something went wrong on my side while trying to respond.\n\nTake 60–90 seconds to just notice your breathing and the physical sensations in your body.\n\nIf you want, you can send a shorter version of what you are facing, in one or two sentences.'
+          'Something went wrong on my side while trying to respond.\n\nTake 60–90 seconds to just notice your breathing and the physical sensations in your body.\n\nIf you want, you can send a shorter version of what you are facing, in one or two sentences.',
+        newInternalState: internalState ?? ''
       };
       return NextResponse.json(fallback, { status: 200 });
     }
@@ -116,7 +122,8 @@ export async function POST(req: NextRequest) {
     const payload: ClassifiedResponse = {
       bucket: parsed.data.bucket,
       crisis: parsed.data.crisis,
-      response: parsed.data.response
+      response: parsed.data.response,
+      newInternalState: parsed.data.newInternalState
     };
 
     return NextResponse.json(payload, { status: 200 });

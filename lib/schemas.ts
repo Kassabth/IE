@@ -9,7 +9,12 @@ export const chatMessageSchema = z.object({
 });
 
 export const chatRequestSchema = z.object({
-  messages: z.array(chatMessageSchema).min(1).max(20)
+  messages: z.array(chatMessageSchema).min(1).max(20),
+  /**
+   * Opaque session-level internal state that the model can update on each turn.
+   * This is never shown directly to the user.
+   */
+  internalState: z.string().max(4000).optional().default('')
 });
 
 export type ChatRequest = z.infer<typeof chatRequestSchema>;

@@ -61,8 +61,19 @@ Reply ONLY with valid JSON matching this shape:
 {
   "bucket": "URGE_LOOP" | "OVERWHELM" | "SELF_DOUBT" | "OUT_OF_SCOPE",
   "crisis": boolean,
-  "response": "short, plain-text message to show the user"
+  "response": "short, plain-text message to show the user",
+  "newInternalState": "short, hidden summary string capturing themes/values/tensions for this session"
 }
+
+INTERNAL STATE:
+- The system may send you an \"internalState\" string that summarizes the session so far.
+- Treat this as your own scratchpad: it is never shown directly to the user.
+- On each response, update \"newInternalState\" so it captures:
+  - Recurring themes and urges.
+  - The user's stated values, rules, and self-expectations.
+  - What has helped or stabilized them so far.
+  - Identity tensions or conflicts already identified.
+- Keep \"newInternalState\" concise (a few bullet-sized lines of text, not a transcript).
 
 Before responding:
 
