@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { chatRequestSchema } from '../../../lib/schemas';
+import { chatRequestSchema, depthEnum } from '../../../lib/schemas';
 import { SYSTEM_PROMPT } from '../../../lib/prompt';
 import { isCrisis } from '../../../lib/safety';
 import { openai } from '../../../lib/openai';
@@ -9,6 +9,57 @@ import type { ChatMessage, ClassifiedResponse } from '../../../lib/types';
 export const runtime = 'nodejs';
 
 // TODO: Implement proper rate limiting (e.g., Redis or database-backed tokens) before broader launch.
+
+const BANNED_GENERIC_PATTERNS = [
+  /what belief is underlying/i,
+  /what does this say about you/i,
+  /what are you really feeling/i,
+  /what do you think is driving this/i,
+  /what does this mean to you/i,
+  /what'?s the deeper need/i,
+  /what need (is|are) (this|you)/i,
+  /what (core )?belief/i
+];
+
+/**
+ * Returns true if the response text contains generic CBT-style questions
+ * that the system prompt explicitly bans.
+ */
+function containsGenericQuestion(text: string): boolean {
+  return BANNED_GENERIC_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * Asks the model to rewrite a response that slipped through with generic questions,
+ * anchoring any question to the user's exact words.
+ */
+async function rewriteGenericResponse(
+  originalResponse: string,
+  userMessage: string
+): Promise<string> {
+  const rewriteCompletion = await openai.chat.completions.create({
+    model: 'gpt-4.1-mini',
+    temperature: 0.4,
+    max_tokens: 400,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are an editor. Rewrite the assistant response below to remove any generic therapy-style questions. ' +
+          'If a question is needed, make it specific to the user\'s exact words. ' +
+          'Propose 2–3 short candidate interpretations drawn from what the user actually said, e.g. "Is it more (1) X, (2) Y, or (3) Z?" ' +
+          'Do NOT use generic questions like "What belief is underlying this?" or "What are you really feeling?". ' +
+          'Return only the rewritten response text, no JSON.'
+      },
+      {
+        role: 'user',
+        content: `User said: "${userMessage}"\n\nOriginal response:\n${originalResponse}\n\nRewritten response:`
+      }
+    ]
+  });
+
+  return rewriteCompletion.choices[0]?.message?.content?.trim() ?? originalResponse;
+}
 
 /**
  * Builds a short, session-only snapshot from recent user messages so the model
@@ -56,6 +107,7 @@ export async function POST(req: NextRequest) {
       const crisisPayload: ClassifiedResponse = {
         bucket: 'OUT_OF_SCOPE',
         crisis: true,
+        depth: 'REACTIVE',
         response:
           [
             'I’m hearing a level of distress that sounds like a real crisis.',
@@ -101,6 +153,7 @@ export async function POST(req: NextRequest) {
       .object({
         bucket: z.enum(['URGE_LOOP', 'OVERWHELM', 'SELF_DOUBT', 'OUT_OF_SCOPE']),
         crisis: z.boolean(),
+        depth: depthEnum,
         response: z.string().min(1),
         newInternalState: z.string().max(4000).optional().default(internalState ?? '')
       })
@@ -111,6 +164,7 @@ export async function POST(req: NextRequest) {
       const fallback: ClassifiedResponse = {
         bucket: 'OUT_OF_SCOPE',
         crisis: false,
+        depth: 'REFLECTIVE',
         response:
           'Something went wrong on my side while trying to respond.\n\nTake 60–90 seconds to just notice your breathing and the physical sensations in your body.\n\nIf you want, you can send a shorter version of what you are facing, in one or two sentences.',
         newInternalState: internalState ?? ''
@@ -118,17 +172,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(fallback, { status: 200 });
     }
 
-    // --- 8) Return validated response to client ---
+    // --- 8) Post-process: rewrite if generic questions slipped through ---
+    let finalResponse = parsed.data.response;
+    if (containsGenericQuestion(finalResponse)) {
+      finalResponse = await rewriteGenericResponse(finalResponse, latestUserMessage.content);
+    }
+
+    // --- 9) Return validated response to client ---
     const payload: ClassifiedResponse = {
       bucket: parsed.data.bucket,
       crisis: parsed.data.crisis,
-      response: parsed.data.response,
+      depth: parsed.data.depth,
+      response: finalResponse,
       newInternalState: parsed.data.newInternalState
     };
 
     return NextResponse.json(payload, { status: 200 });
   } catch (error) {
-    // --- 9) Log and return generic 500 on unexpected errors ---
+    // --- 10) Log and return generic 500 on unexpected errors ---
     console.error('Chat route error', error);
     return NextResponse.json(
       {

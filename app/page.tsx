@@ -11,11 +11,13 @@ interface UiMessage {
   bucket?: Bucket;
   crisis?: boolean;
   createdAt: string;
+  depth?: 'REACTIVE' | 'REFLECTIVE' | 'META';
 }
 
 type ApiResponse = {
   bucket: Bucket;
   crisis: boolean;
+  depth: 'REACTIVE' | 'REFLECTIVE' | 'META';
   response: string;
   newInternalState: string;
 };
@@ -77,6 +79,7 @@ export default function HomePage() {
         content: data.response,
         bucket: data.bucket,
         crisis: data.crisis,
+        depth: data.depth,
         createdAt: new Date().toISOString()
       };
 

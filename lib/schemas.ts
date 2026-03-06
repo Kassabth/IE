@@ -1,7 +1,9 @@
 import { z } from 'zod';
-import type { Bucket } from './types';
+import type { Bucket, DepthLevel } from './types';
 
 export const bucketEnum = z.enum(['URGE_LOOP', 'OVERWHELM', 'SELF_DOUBT', 'OUT_OF_SCOPE']) as z.ZodType<Bucket>;
+
+export const depthEnum = z.enum(['REACTIVE', 'REFLECTIVE', 'META']) as z.ZodType<DepthLevel>;
 
 export const chatMessageSchema = z.object({
   role: z.enum(['user', 'assistant', 'system']),
