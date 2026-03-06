@@ -4,9 +4,23 @@ import { chatRequestSchema, depthEnum } from '../../../lib/schemas';
 import { SYSTEM_PROMPT } from '../../../lib/prompt';
 import { isCrisis } from '../../../lib/safety';
 import { openai } from '../../../lib/openai';
-import type { ChatMessage, ClassifiedResponse } from '../../../lib/types';
+import type { ChatMessage, ClassifiedResponse, DepthLevel } from '../../../lib/types';
 
 export const runtime = 'nodejs';
+
+/**
+ * Temperature per depth level.
+ * REACTIVE: tighter, more grounded.
+ * REFLECTIVE: slightly more expressive.
+ * META: most room for nuance and variation.
+ */
+const TEMP_BY_DEPTH: Record<DepthLevel, number> = {
+  REACTIVE: 0.45,
+  REFLECTIVE: 0.55,
+  META: 0.6
+};
+
+const TOP_P = 0.9;
 
 // TODO: Implement proper rate limiting (e.g., Redis or database-backed tokens) before broader launch.
 
@@ -59,6 +73,45 @@ async function rewriteGenericResponse(
   });
 
   return rewriteCompletion.choices[0]?.message?.content?.trim() ?? originalResponse;
+}
+
+/**
+ * Lightweight pre-classification pass: infers depth level from the latest user
+ * message and session context so we can set the right temperature before the
+ * full response call. Falls back to REFLECTIVE on any error.
+ */
+async function inferDepth(
+  userMessage: string,
+  internalState: string
+): Promise<DepthLevel> {
+  try {
+    const result = await openai.chat.completions.create({
+      model: 'gpt-4.1-mini',
+      temperature: 0.2,
+      max_tokens: 10,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Classify the user message into exactly one depth level: REACTIVE, REFLECTIVE, or META.\n' +
+            'REACTIVE = high urgency, impulsive, flooded.\n' +
+            'REFLECTIVE = naming patterns, observing own behavior.\n' +
+            'META = thinking about identity, values, internal rules.\n' +
+            (internalState ? `Session context: ${internalState.slice(0, 300)}\n` : '') +
+            'Reply with ONLY the single word: REACTIVE, REFLECTIVE, or META.'
+        },
+        { role: 'user', content: userMessage }
+      ]
+    });
+
+    const word = result.choices[0]?.message?.content?.trim().toUpperCase();
+    if (word === 'REACTIVE' || word === 'REFLECTIVE' || word === 'META') {
+      return word as DepthLevel;
+    }
+    return 'REFLECTIVE';
+  } catch {
+    return 'REFLECTIVE';
+  }
 }
 
 /**
@@ -124,10 +177,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(crisisPayload, { status: 200 });
     }
 
-    // --- 4) Build a short snapshot from recent user messages (session-only hint) ---
+    // --- 4) Pre-classify depth to select the right temperature before the main call ---
+    const preDepth = await inferDepth(latestUserMessage.content, internalState ?? '');
+    const temperature = TEMP_BY_DEPTH[preDepth];
+
+    // --- 5) Build a short snapshot from recent user messages (session-only hint) ---
     const snapshot = buildSessionSnapshot(messages);
 
-    // --- 5) Assemble messages for OpenAI: system prompt + existing internal state + snapshot + conversation ---
+    // --- 6) Assemble messages for OpenAI: system prompt + existing internal state + snapshot + conversation ---
     const openaiMessages = [
       { role: 'system' as const, content: SYSTEM_PROMPT },
       ...(internalState
@@ -137,10 +194,11 @@ export async function POST(req: NextRequest) {
       ...messages.map((m: ChatMessage) => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }))
     ];
 
-    // --- 6) Call OpenAI with structured JSON output ---
+    // --- 7) Call OpenAI with depth-tuned temperature and top_p ---
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1-mini',
-      temperature: 0.55,
+      temperature,
+      top_p: TOP_P,
       max_tokens: 700,
       messages: openaiMessages,
       response_format: { type: 'json_object' }
@@ -148,7 +206,7 @@ export async function POST(req: NextRequest) {
 
     const raw = completion.choices[0]?.message?.content ?? '';
 
-    // --- 7) Parse and validate model JSON; fallback to safe message on failure ---
+    // --- 8) Parse and validate model JSON; fallback to safe message on failure ---
     const parsed = z
       .object({
         bucket: z.enum(['URGE_LOOP', 'OVERWHELM', 'SELF_DOUBT', 'OUT_OF_SCOPE']),
@@ -172,13 +230,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(fallback, { status: 200 });
     }
 
-    // --- 8) Post-process: rewrite if generic questions slipped through ---
+    // --- 9) Post-process: rewrite if generic questions slipped through ---
     let finalResponse = parsed.data.response;
     if (containsGenericQuestion(finalResponse)) {
       finalResponse = await rewriteGenericResponse(finalResponse, latestUserMessage.content);
     }
 
-    // --- 9) Return validated response to client ---
+    // --- 10) Return validated response to client ---
     const payload: ClassifiedResponse = {
       bucket: parsed.data.bucket,
       crisis: parsed.data.crisis,
